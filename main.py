@@ -9,7 +9,10 @@ from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 import sqlite3
 import asyncio
+
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -86,8 +89,72 @@ async def cmd_start(message: types.Message):
         "Привет! Я бот для организации мероприятий.\n"
         "Доступные команды:\n"
         "/create_event - Создать мероприятие\n"
-        "/my_events - Мои мероприятия"
+        "/my_events - Мои мероприятия\n"
+        "/delete_event - Удалить мероприятие"
     )
+
+
+# Добавим новое состояние для удаления
+class EventDeletionStates(StatesGroup):
+    CONFIRM_DELETE = State()
+
+
+# Дополним хелпер-функции
+def delete_event(event_id):
+    # Удаляем связанные данные
+    cursor.execute('DELETE FROM participants WHERE event_id = ?', (event_id,))
+    cursor.execute('DELETE FROM tasks WHERE event_id = ?', (event_id,))
+    cursor.execute('DELETE FROM events WHERE id = ?', (event_id,))
+    conn.commit()
+
+
+def get_user_events(user_id):
+    cursor.execute('SELECT id, name, date FROM events WHERE creator_id = ?', (user_id,))
+    return cursor.fetchall()
+
+
+# Добавим обработчики команд
+@dp.message(Command("delete_event"))
+async def cmd_delete_event(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    events = get_user_events(user_id)
+
+    if not events:
+        await message.answer("❌ У вас нет созданных мероприятий")
+        return
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    for event in events:
+        event_id, name, date = event
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(
+                text=f"{name} ({date})",
+                callback_data=f"confirm_delete_{event_id}"
+            )
+        ])
+
+    await message.answer("Выберите мероприятие для удаления:", reply_markup=keyboard)
+
+
+@dp.callback_query(F.data.startswith("confirm_delete_"))
+async def process_delete_event(callback: types.CallbackQuery):
+    event_id = int(callback.data.split("_")[-1])
+    user_id = callback.from_user.id
+
+    # Проверяем права доступа
+    cursor.execute('SELECT creator_id FROM events WHERE id = ?', (event_id,))
+    result = cursor.fetchone()
+
+    if not result or result[0] != user_id:
+        await callback.answer("❌ Вы не можете удалить это мероприятие!", show_alert=True)
+        return
+
+    # Удаляем мероприятие
+    delete_event(event_id)
+
+    # Удаляем сообщение с кнопками
+    await callback.message.delete()
+    await callback.answer("✅ Мероприятие успешно удалено!", show_alert=True)
 
 
 @dp.message(Command("create_event"))
